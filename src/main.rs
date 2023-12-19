@@ -1,37 +1,28 @@
 use anyhow::{bail, Result};
-use crossterm::cursor::{
-    DisableBlinking, EnableBlinking, MoveTo, RestorePosition, SavePosition, Show,
-};
-use crossterm::event::{
-    DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers,
-};
-use crossterm::style::{Color, Print, ResetColor, SetBackgroundColor, SetForegroundColor};
+use crossterm::cursor::EnableBlinking;
+use crossterm::event::DisableMouseCapture;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen, SetSize,
 };
-use crossterm::{cursor, ExecutableCommand};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout};
-use ratatui::style::Style;
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::Paragraph;
 use ratatui::Terminal;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::io::Write;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
+use std::net::{TcpListener, TcpStream};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 use std::{env, io, thread};
-use tui_textarea::{Input, Key, TextArea};
+use tui_textarea::{Input, Key};
 
-use crossbeam_channel::{bounded, select, unbounded};
+use toywoot::woot::{self};
 
-use toywoot::woot::{self, Character};
-
-fn connect(ipport: &str) -> anyhow::Result<TcpStream> {
+fn connect(ip: &str, port: u16) -> anyhow::Result<TcpStream> {
     for _ in 0..10 {
         thread::sleep(Duration::from_secs(1));
 
-        let stream = TcpStream::connect(ipport);
+        let stream = TcpStream::connect((ip, port));
         match stream {
             Ok(stream) => return Ok(stream),
             Err(_) => continue,
@@ -69,7 +60,7 @@ fn main() -> Result<()> {
     }
 
     // listen
-    let listener = TcpListener::bind(format!("127.0.0.1:{:?}", from)).unwrap();
+    let listener = TcpListener::bind(("127.0.0.1", from)).unwrap();
 
     let mut px: usize = 0;
     // settings for crossterm
@@ -83,9 +74,8 @@ fn main() -> Result<()> {
     let mut term = Terminal::new(backend)?;
 
     // key event receiver thread
-    // let (tx, rx) = mpsc::channel();
-    let (sender1, receiver1) = bounded(0);
-    let (sender2, receiver2) = (sender1.clone(), receiver1.clone());
+    let (tx, rx) = mpsc::channel();
+    let tx2 = tx.clone();
 
     thread::spawn(move || loop {
         match crossterm::event::read() {
@@ -93,7 +83,7 @@ fn main() -> Result<()> {
             Ok(event) => {
                 let input: Input = event.into();
                 // tx.send(input).expect("can send message");
-                sender1.send(input).expect("can send message");
+                tx.send(input).expect("can send message");
             }
         }
     });
@@ -136,7 +126,7 @@ fn main() -> Result<()> {
                         shift: false,
                     };
 
-                    sender2.send(dummy_input).expect("can send dummy");
+                    tx2.send(dummy_input).expect("can send dummy");
                 }
             }
         }
@@ -149,131 +139,126 @@ fn main() -> Result<()> {
                 .constraints([Constraint::Length(1), Constraint::Percentage(10)].as_ref())
                 .split(f.size());
             let s = s1.lock().unwrap();
-            f.render_widget(Paragraph::new(s.seq.text()), chunks[0]);
+            let text = Paragraph::new(s.seq.text());
+            f.render_widget(text, chunks[0]);
             f.render_widget(Paragraph::new(format!("error: ",)), chunks[1]);
             f.set_cursor(px as u16, 0);
             drop(s);
         })?;
 
-        select! {
-            recv(receiver1) -> msg => {
-                match msg  {
+        match rx.recv()? {
+            Input { key: Key::Esc, .. } => {
+                break;
+            }
+            Input { key: Key::Null, .. } => {
+                //nop
+            }
+            Input {
+                key: Key::Backspace,
+                ..
+            }
+            | Input {
+                key: Key::Char('h'),
+                ctrl: true,
+                ..
+            } => {
+                let mut s = s1.lock().unwrap();
+                match s.generate_del(px) {
                     Err(e) => {
-                        eprintln!("{:?}",e);
-                    },
-                    Ok(input) => {
-                        match input {
-                            Input { key: Key::Esc, .. } => {
-                                break;
-                            },
-                            Input { key: Key::Null, .. } => {
-                                //nop
-                            },
-                            Input {
-                                key: Key::Backspace,
-                                ..
-                            } => {
-                                let mut s = s1.lock().unwrap();
-                                match s.generate_del(px) {
-                                    Err(e) => {
-                                        drop(s);
-                                        // eprintln!("{:?}", e);
-                                        error_message = e.to_string();
-                                    }
-                                    Ok(operation) => {
-                                        drop(s);
-                                        // noop
-                                        error_message.clear();
+                        drop(s);
+                        // eprintln!("{:?}", e);
+                        error_message = e.to_string();
+                    }
+                    Ok(operation) => {
+                        drop(s);
+                        // noop
+                        error_message.clear();
 
-                                        thread::spawn(move || {
-                                            // connect
-                                            let mut stream = connect(&format!("127.0.0.1:{:?}", to)).unwrap();
+                        thread::spawn(move || {
+                            // connect
+                            let mut stream = connect("127.0.0.1", to).unwrap();
 
-                                            let del = serde_json::to_string(&operation).unwrap();
-                                            thread::sleep(Duration::from_secs(delay));
-                                            stream.write_all(del.as_bytes()).expect("can send");
-                                        });
-                                    }
-                                }
-                                if px > 0 {
-                                    px -= 1;
-                                }
-                            }
-                            Input {
-                                key: Key::Enter, ..
-                            } => {
-                                // noop
-                            }
-                            Input { key: Key::Left, .. } => {
-                                if px > 0 {
-                                    px -= 1;
-                                }
-                            }
-                            Input {
-                                key: Key::Char('b'),
-                                ctrl: true,
-                                ..
-                            } => {
-                                if px > 0 {
-                                    px -= 1;
-                                }
-                            }
-                            Input {
-                                key: Key::Char('f'),
-                                ctrl: true,
-                                ..
-                            } => {
-                                px += 1;
-                                let s = s1.lock().unwrap();
-                                let len = s.seq.text().len();
-                                if px > len {
-                                    px = len;
-                                }
-                            }
-                            Input {
-                                key: Key::Right, ..
-                            } => {
-                                let s = s1.lock().unwrap();
-                                px += 1;
-                                let len = s.seq.text().len();
-                                if px > len {
-                                    px = len;
-                                }
-                                drop(s);
-                            }
-                            Input { key, .. } => {
-                               px += 1;
-                                for ch in 'a'..='z' {
-                                    if key == Key::Char(ch) {
-                                        let mut s = s1.lock().unwrap();
-                                        match s.generate_ins(px as usize, &ch.to_string()) {
-                                            Err(e) => {
-                                                drop(s);
-                                                eprintln!("{:?}", e);
-                                            }
-                                            Ok(operation) => {
-                                                drop(s);
-                                                // noop
-                                                error_message.clear();
-
-                                                thread::spawn(move || {
-                                                    // connect
-                                                    let mut stream = connect(&format!("127.0.0.1:{:?}", to)).unwrap();
-
-                                                    let del = serde_json::to_string(&operation).unwrap();
-                                                    thread::sleep(Duration::from_secs(delay));
-                                                    stream.write_all(del.as_bytes()).expect("can send");
-                                                });
-                                            }
-                                        }
-                                        break;
-                                    }
-                                }
-                            }
-                        }
+                            let del = serde_json::to_string(&operation).unwrap();
+                            thread::sleep(Duration::from_secs(delay));
+                            stream.write_all(del.as_bytes()).expect("can send");
+                        });
                     }
                 }
-            },
+                if px > 0 {
+                    px -= 1;
+                }
+            }
+            Input {
+                key: Key::Enter, ..
+            } => {
+                // noop
+            }
+            Input { key: Key::Left, .. } => {
+                if px > 0 {
+                    px -= 1;
+                }
+            }
+            Input {
+                key: Key::Char('b'),
+                ctrl: true,
+                ..
+            } => {
+                if px > 0 {
+                    px -= 1;
+                }
+            }
+            Input {
+                key: Key::Char('f'),
+                ctrl: true,
+                ..
+            } => {
+                px += 1;
+                let s = s1.lock().unwrap();
+                let len = s.seq.text().len();
+                if px > len {
+                    px = len;
+                }
+            }
+            Input {
+                key: Key::Right, ..
+            } => {
+                let s = s1.lock().unwrap();
+                px += 1;
+                let len = s.seq.text().len();
+                if px > len {
+                    px = len;
+                }
+                drop(s);
+            }
+            Input { key, .. } => {
+                px += 1;
+                for ch in 'a'..='z' {
+                    if key == Key::Char(ch) {
+                        let mut s = s1.lock().unwrap();
+                        match s.generate_ins(px as usize, &ch.to_string()) {
+                            Err(e) => {
+                                drop(s);
+                                eprintln!("{:?}", e);
+                            }
+                            Ok(operation) => {
+                                drop(s);
+                                // noop
+                                error_message.clear();
+
+                                thread::spawn(move || {
+                                    // connect
+                                    let mut stream = connect("127.0.0.1", to).unwrap();
+
+                                    let del = serde_json::to_string(&operation).unwrap();
+                                    thread::sleep(Duration::from_secs(delay));
+                                    stream.write_all(del.as_bytes()).expect("can send");
+                                });
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
         }
     }
 
@@ -285,7 +270,6 @@ fn main() -> Result<()> {
     )?;
     term.show_cursor()?;
 
-    // unsafe { libc::shutdown(fd, libc::SHUT_RD) };
     log::info!("px: {:?}", px);
     let s = s2.lock().unwrap();
     log::info!("text: {:?}", s.seq.text());

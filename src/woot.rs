@@ -12,9 +12,9 @@ pub struct Site {
 
 pub fn new_site(id: i64, clock: i64) -> Site {
     return Site {
-        id: id,
-        clock: clock,
-        seq: new_sequence(id, String::from("")),
+        id,
+        clock,
+        seq: new_sequence(),
     };
 }
 
@@ -66,6 +66,7 @@ impl Site {
         return self.integrate_ins(c, &cp, &cn);
     }
 
+    // insert c between cp and cn
     pub fn integrate_ins(
         &mut self,
         c: Character,
@@ -76,7 +77,7 @@ impl Site {
         // println!("subseq {:?} and {:?}", cp.id, cn.id);
         let subseq = self.seq.subseq(cp, cn).context("failed to get subseq")?;
         if subseq.chars.len() == 0 {
-            self.seq.insert2(&c, p).context("error")?;
+            self.seq.insert(&c, p).context("error")?;
         } else {
             // println!("----------subseq----------------------");
             // for (_, sc) in subseq.chars.iter().enumerate() {
@@ -99,7 +100,11 @@ impl Site {
                 //     sc_next_id,
                 //     cn.id.less_than_or_equal(&sc_next_id)
                 // );
-                if sc_prev_id.less_than_or_equal(&cp.id) && cn.id.less_than_or_equal(&sc_next_id) {
+                let lowerbound = cp.id;
+                let upperbound = cn.id;
+                if sc_prev_id.less_than_or_equal(&lowerbound)
+                    && upperbound.less_than_or_equal(&sc_next_id)
+                {
                     l.push(sc);
                 }
             }
@@ -154,6 +159,7 @@ impl Site {
 }
 
 // section 3.1, Data Model in the paper (https://hal.inria.fr/inria-00108523/document)
+// definition 1
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Character {
     pub id: ID,
@@ -169,6 +175,8 @@ impl PartialEq for Character {
     }
 }
 
+// section 3.1, Data Model in the paper (https://hal.inria.fr/inria-00108523/document)
+// definition 3
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct ID {
     pub ns: i64, // the identifier of a site
@@ -190,15 +198,7 @@ impl ID {
     }
 }
 
-const CB_ID: ID = ID {
-    ns: i64::MIN,
-    ng: 0,
-};
-const CE_ID: ID = ID {
-    ns: i64::MAX,
-    ng: 1,
-};
-
+// character placed at the start
 pub const CB: Character = Character {
     id: CB_ID,
     c: String::new(),
@@ -207,12 +207,23 @@ pub const CB: Character = Character {
     next_id: None,
 };
 
+const CB_ID: ID = ID {
+    ns: i64::MIN,
+    ng: 0,
+};
+
+// character placed at the end
 pub const CE: Character = Character {
     id: CE_ID,
     c: String::new(),
     visible: false,
     prev_id: None,
     next_id: None,
+};
+
+const CE_ID: ID = ID {
+    ns: i64::MAX,
+    ng: 0,
 };
 
 #[derive(Debug)]
@@ -234,15 +245,14 @@ impl SubSequence {
     }
 }
 
-pub fn new_sequence(site_id: i64, s: String) -> Sequence {
+// section 3.4, Example in the paper (https://hal.inria.fr/inria-00108523/document)
+// initial state is "cbce"
+pub fn new_sequence() -> Sequence {
     let mut seq = Sequence {
         chars: LinkedList::new(),
     };
 
     seq.chars.push_back(CB);
-    // for (i, ch) in s.chars().enumerate() {
-    //     seq = seq.insert(ch.to_string(), site_id, i as i64, i).unwrap();
-    // }
     seq.chars.push_back(CE);
 
     return seq;
@@ -262,36 +272,8 @@ impl Sequence {
     pub fn pos(&self, c: &Character) -> Option<usize> {
         self.chars.iter().position(|char| *c == *char)
     }
-    pub fn pos2(&self, id: &ID) -> Option<usize> {
-        self.chars.iter().position(|char| char.id == *id)
-    }
-    // pub fn insert(
-    //     mut self,
-    //     ch: String,
-    //     site_id: i64,
-    //     clock: i64,
-    //     p: usize,
-    // ) -> anyhow::Result<Self> {
-    //     match self.chars.iter().nth(p) {
-    //         None => Err(anyhow!("out of bounds")),
-    //         Some(_) => {
-    //             let mut tail = self.chars.split_off(p);
-    //             self.chars.push_back(Character {
-    //                 id: ID {
-    //                     ns: site_id,
-    //                     ng: clock,
-    //                 },
-    //                 visible: true,
-    //                 c: ch,
-    //             });
-    //             self.chars.append(&mut tail);
 
-    //             return Ok((self));
-    //         }
-    //     }
-    // }
-
-    pub fn insert2(&mut self, ch: &Character, p: usize) -> anyhow::Result<()> {
+    pub fn insert(&mut self, ch: &Character, p: usize) -> anyhow::Result<()> {
         match self.chars.iter().nth(p) {
             None => Err(anyhow!("out of bounds")),
             Some(_) => {
@@ -310,13 +292,13 @@ impl Sequence {
             .chars
             .iter()
             .position(|char| *c == *char)
-            .context("not found")?;
+            .context(format!("not found: {:?}", c))?;
 
         let right = self
             .chars
             .iter()
             .position(|char| *d == *char)
-            .context("not found")?;
+            .context(format!("not found: {:?}", d))?;
 
         let mut chars = self.chars.clone();
         let mut ret = chars.split_off(left + 1);
@@ -355,8 +337,8 @@ mod tests {
         1
     }
 
-    fn initial_seq(s: &str) -> woot::Sequence {
-        new_sequence(site_id(), s.to_string())
+    fn initial_seq() -> woot::Sequence {
+        new_sequence()
     }
 
     fn character(s: String, site_id: i64, clock: i64) -> woot::Character {
@@ -373,32 +355,8 @@ mod tests {
     }
 
     #[test]
-    fn test_insert() {
-        // let ch1 = character(String::from("a"), site_id(), 0);
-        // let ch2 = character(String::from("b"), site_id(), 1);
-        // let mut seq = initial_seq("");
-        // let mut clock = 0;
-
-        // // [cb, ce] => [cb, a, ce]
-        // seq = seq
-        //     .insert(String::from("a"), site_id(), clock, 1)
-        //     .unwrap_or(initial_seq("not expected value"));
-        // assert_eq!(seq.pos(&ch1).is_some_and(|p| p == 1), true);
-
-        // clock += 1;
-
-        // // [cb, a, ce] => [cb, b, a, ce]
-        // seq = seq
-        //     .insert(String::from("a"), site_id(), clock, 1)
-        //     .unwrap_or(initial_seq("not expected value"));
-
-        // assert_eq!(seq.pos(&ch2).is_some_and(|p| p == 1), true);
-        // assert_eq!(seq.pos(&ch1).is_some_and(|p| p == 2), true);
-    }
-
-    #[test]
     fn test_pos() {
-        let seq = initial_seq("");
+        let seq = initial_seq();
         assert_eq!(seq.pos(&woot::CB).is_some_and(|p| p == 0), true);
         assert_eq!(seq.pos(&woot::CE).is_some_and(|p| p == 1), true);
 
@@ -407,45 +365,11 @@ mod tests {
     }
 
     #[test]
-    fn test_subseq() {
-        let ch1 = character(String::from("a"), site_id(), 0);
-        let ch2 = character(String::from("b"), site_id(), 1);
-        let ch3 = character(String::from("c"), site_id(), 2);
-        // [cb, a, b, c, ce]
-        let seq = initial_seq("abc");
-
-        match seq.subseq(&ch1, &ch2) {
-            Err(_) => assert!(false, "failed to get subseq"),
-            Ok(subseq) => {
-                assert_eq!(subseq.chars.len(), 0);
-                assert_eq!(subseq.pos(&ch1).is_none(), true);
-                assert_eq!(subseq.pos(&ch2).is_none(), true);
-                assert_eq!(subseq.pos(&ch3).is_none(), true);
-            }
-        }
-
-        match seq.subseq(&ch1, &ch3) {
-            Err(_) => assert!(false, "failed to get subseq"),
-            Ok(subseq) => {
-                assert_eq!(subseq.pos(&ch2).is_some_and(|p| p == 0), true);
-                assert_eq!(subseq.pos(&ch3).is_none(), true);
-
-                assert_eq!(subseq.nth(0).is_some_and(|ch| *ch == ch2), true);
-            }
-        }
-    }
-
-    #[test]
-    fn test_site() {
+    fn test_insert_and_delete() {
         let mut site = new_site(1, 0);
         // [cb,ce] => [cb, a, b, ce]
         assert_eq!(site.generate_ins(1, "a").is_ok(), true);
         assert_eq!(site.generate_ins(2, "b").is_ok(), true);
-        if let Some(ch) = site.seq.ith_visible(1) {
-            println!("ch: {}", ch.c);
-        } else {
-            println!("something wrong");
-        }
         assert_eq!(site.seq.ith_visible(1).is_some_and(|c| c.c == "a"), true);
         assert_eq!(site.seq.ith_visible(2).is_some_and(|c| c.c == "b"), true);
 
@@ -455,7 +379,7 @@ mod tests {
         assert_eq!(site.seq.ith_visible(2).is_some_and(|c| c.c == "a"), true);
         assert_eq!(site.seq.ith_visible(3).is_some_and(|c| c.c == "b"), true);
 
-        // [cb, b, a, b, ce] -> [cb, b, a, c, b, ce]
+        // [cb, b, a, b, ce] - ins(3, c) -> [cb, b, a, c, b, ce]
         assert_eq!(site.generate_ins(3, "c").is_ok(), true);
         assert_eq!(site.seq.ith_visible(1).is_some_and(|c| c.c == "b"), true);
         assert_eq!(site.seq.ith_visible(2).is_some_and(|c| c.c == "a"), true);
@@ -474,11 +398,11 @@ mod tests {
         assert_eq!(site.seq.ith_visible(2).is_some_and(|c| c.c == "c"), true);
         assert_eq!(site.seq.ith_visible(3).is_none(), true);
 
+        // [b, a(not visible), c] of subseq(b,c) should be a(not visible)
         let c1 = site.seq.ith_visible(1).unwrap();
         let c2 = site.seq.ith_visible(2).unwrap();
         let sub = site.seq.subseq(&c1, &c2).unwrap();
-
-        println!("len: {:?}", sub.chars.len());
+        assert_eq!(sub.chars.len(), 1);
 
         // [cb, b, c, ce] - ins(2,a) -> [cb, b, c, a, ce]
         assert_eq!(site.generate_ins(2, "a").is_ok(), true);
